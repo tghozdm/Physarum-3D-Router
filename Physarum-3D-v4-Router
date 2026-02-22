@@ -1,0 +1,413 @@
+"""
+Physarum-3D-v4-Router: Zero-Drop Pure-Spiking MoE Routing Algorithm
+Copyright (c) 2026 Tolgahan Ozdemir
+
+This work is licensed under the Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License.
+To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-nd/4.0/
+
+KULLANIM ŞARTLARI (CC BY-NC-ND 4.0):
+1. Atıf (BY): Bu kod kullanıldığında veya paylaşıldığında orijinal yazara (Tolgahan Ozdemir) ve TUSofia-Rila projesine atıf yapılmalıdır.
+2. Gayriticari (NC): Bu kod ve içerdiği algoritmalar, yazarın yazılı izni olmadan ticari amaçlarla (ücretli API, kapalı kaynak ticari modeller vb.) KULLANILAMAZ.
+3. Türetilemez (ND): Bu kod üzerinde değişiklik yapılarak, modifiye edilerek veya üzerine ekleme yapılarak yeni bir versiyonu (derivative work) dağıtılamaz.
+
+Ticari lisanslama ve özel kullanım hakları için yazar ile iletişime geçilmelidir.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class Physarum-3D-v4-Router(nn.Module):
+    def __init__(self, d_model, num_experts, top_k=2):
+        super().__init__()
+        self.n = num_experts
+        self.k = top_k
+        self.max_voltage = 14.0 # Nöromorfik Aksiyon Potansiyeli
+        
+        self.proj = nn.Linear(d_model, num_experts)
+        
+        # İçsel Yorgunluk (Fatigue) Hafızası - Karadelik Koruması
+        self.register_buffer("fat", torch.zeros(num_experts))
+        
+        # 3D Donanım Direnci (Topoloji - Önceden hesaplanmış matris)
+        coords = self._generate_fibonacci_sphere(num_experts)
+        self.register_buffer("res", torch.cdist(coords, coords) * 0.2)
+
+    @staticmethod
+    def _generate_fibonacci_sphere(n, radius=1.0):
+        phi = math.pi * (3. - math.sqrt(5.))
+        i = torch.arange(n, dtype=torch.float32)
+        y = 1.0 - (i / (n - 1)) * 2.0
+        r = torch.sqrt(torch.clamp(1.0 - y * y, min=0.0)) * radius
+        theta = phi * i
+        return torch.stack([torch.cos(theta) * r, y, torch.sin(theta) * r], dim=1)
+
+    def forward(self, x, node_idx=0):
+        # 1. Voltaj Sınırı (Sinyali hapsediyoruz)
+        sig = torch.tanh(self.proj(x)) * self.max_voltage
+        
+        # 2. Dinamik Eşik (Baz + Yorgunluk + 3D Fiziksel Direnç)
+        thr = 0.1 + 2.0 * self.fat + self.res[node_idx]
+        
+        # 3. Spiking (Ya Hep Ya Hiç prensibi)
+        spikes = F.relu(sig - thr)
+        
+        # 4. Maskeleme ve Failsafe (Çökme koruması)
+        mask = spikes == 0
+        logits = spikes.masked_fill(mask & ~mask.all(-1, keepdim=True), -1e4)
+        
+        # 5. Olasılık Dağılımı ve Top-K Seçimi
+        probs = F.softmax(logits, dim=-1)
+        weights, indices = torch.topk(probs, self.k, dim=-1)
+        
+        # Yorgunluğu Güncelle (Sadece eğitim modunda)
+        if self.training:
+            self.fat.lerp_(probs.mean((0, 1)).detach(), 0.2)
+            
+        return weights, indices
+
+"""
+TUSofia-Rila Physarum-3D-v4-Router — Benchmark (max_voltage=14.0, kappa=2.0)
+Calistir: python benchmark.py
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math, time
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+G,Y,R,B,W,X = "\033[92m","\033[93m","\033[91m","\033[94m","\033[1m","\033[0m"
+def ok(m):   print(f"  {G}✅ {m}{X}")
+def warn(m): print(f"  {Y}⚠️  {m}{X}")
+def fail(m): print(f"  {R}❌ {m}{X}")
+def info(m): print(f"  {B}ℹ️  {m}{X}")
+def hdr(t):  print(f"\n{W}{'='*60}\n  {t}\n{'='*60}{X}")
+
+class RouterV2(nn.Module):
+    def __init__(self, d, n, k=2):
+        super().__init__()
+        self.n, self.k   = n, k
+        self.max_voltage  = 14.0
+        self.proj         = nn.Linear(d, n)
+        self.register_buffer("fat",    torch.zeros(n))
+        self.register_buffer("coords", self._sphere(n))
+
+    @staticmethod
+    def _sphere(n, r=1.0):
+        phi = math.pi * (3. - math.sqrt(5.))
+        rows = []
+        for i in range(n):
+            y  = 1 - (i / float(n - 1)) * 2
+            rv = math.sqrt(max(0., 1 - y * y)) * r
+            rows.append([math.cos(phi * i) * rv, y, math.sin(phi * i) * rv])
+        return torch.tensor(rows, dtype=torch.float32)
+
+    def forward(self, x, node=0, lat=None):
+        if lat is None:
+            lat = torch.zeros(self.n, device=x.device)
+        sig  = torch.tanh(self.proj(x)) * self.max_voltage
+        src  = self.coords[node].unsqueeze(0)
+        dist = torch.norm(self.coords - src, dim=1)
+        thr  = (0.1 + 2.0 * self.fat + dist * 0.2 + lat * 2.0).view(1, 1, -1)
+        sp   = F.relu(sig - thr)
+        mask = sp == 0
+        lg   = sp.masked_fill(mask & ~mask.all(-1, keepdim=True), -1e4)
+        pr   = F.softmax(lg, dim=-1)
+        w, i = torch.topk(pr, self.k, dim=-1)
+        if self.training:
+            self.fat.copy_(0.8 * self.fat + 0.2 * pr.mean((0, 1)).detach())
+        return w, i
+
+class RouterV4(nn.Module):
+    def __init__(self, d, n, k=2):
+        super().__init__()
+        self.n, self.k   = n, k
+        self.max_voltage  = 14.0
+        self.proj         = nn.Linear(d, n)
+        self.register_buffer("fat",  torch.zeros(n))
+        self.register_buffer("zlat", torch.zeros(n))
+        coords = self._sphere(n)
+        self.register_buffer("res", torch.cdist(coords, coords) * 0.2)
+
+    @staticmethod
+    def _sphere(n, r=1.0):
+        phi = math.pi * (3. - math.sqrt(5.))
+        i   = torch.arange(n, dtype=torch.float32)
+        y   = 1.0 - (i / (n - 1)) * 2.0
+        rv  = torch.sqrt(torch.clamp(1.0 - y * y, min=0.0)) * r
+        th  = phi * i
+        return torch.stack([torch.cos(th) * rv, y, torch.sin(th) * rv], dim=1)
+
+    def forward(self, x, node=0, lat=None):
+        if lat is None:
+            lat = self.zlat
+        sig  = torch.tanh(self.proj(x)) * self.max_voltage
+        thr  = 0.1 + 2.0 * self.fat + self.res[node] + lat * 2.0
+        sp   = F.relu(sig - thr)
+        mask = sp == 0
+        lg   = sp.masked_fill(mask & ~mask.all(-1, keepdim=True), -1e4)
+        pr   = F.softmax(lg, dim=-1)
+        w, i = torch.topk(pr, self.k, dim=-1)
+        if self.training:
+            self.fat.lerp_(pr.mean((0, 1)).detach(), 0.2)
+        return w, i
+
+class Baseline(nn.Module):
+    def __init__(self, d, n, k=2):
+        super().__init__()
+        self.gate = nn.Linear(d, n)
+        self.k    = k
+
+    def forward(self, x):
+        return torch.topk(F.softmax(self.gate(x), dim=-1), self.k, dim=-1)
+
+def timed(fn, warmup=20, runs=200):
+    for _ in range(warmup): fn()
+    torch.cuda.synchronize()
+    t = time.time()
+    for _ in range(runs): fn()
+    torch.cuda.synchronize()
+    return (time.time() - t) / runs * 1000
+
+def train(router, xn, steps, n):
+    opt = torch.optim.Adam(router.parameters(), lr=0.01)
+    router.train()
+    for s in range(steps):
+        opt.zero_grad()
+        w, _ = router(xn, node=s % n)
+        w.sum().backward()
+        opt.step()
+
+def dist_stats(router, xn, steps, n, lat=None):
+    counts = torch.zeros(n, device=device)
+    router.eval()
+    with torch.no_grad():
+        for s in range(steps):
+            _, idx = router(xn, node=s % n, lat=lat)
+            top1   = idx[:, :, 0].flatten()
+            for i in range(n):
+                counts[i] += (top1 == i).sum()
+    pct    = (counts / counts.sum()) * 100
+    maxdev = torch.max(torch.abs(pct - 100. / n)).item()
+    ent    = (-torch.sum((counts / counts.sum()) *
+               torch.log(counts / counts.sum() + 1e-9)) / math.log(n)).item()
+    return pct, maxdev, ent
+
+def show_dist(pct, n, hot=()):
+    ideal = 100. / n
+    for i in range(n):
+        bar  = "█" * int(pct[i].item() / 2)
+        flag = " 🔥" if i in hot else (" ◄" if pct[i].item() > ideal * 1.5 else "")
+        print(f"    Expert {i} [{pct[i]:>5.2f}%]: {bar}{flag}")
+
+def t1_distribution():
+    hdr("TEST 1: Dağılım Kalitesi — v4 vs Baseline")
+    d, n, b, s = 512, 8, 16, 64
+    xn = F.layer_norm(torch.randn(b, s, d, device=device), (d,))
+
+    rv4 = RouterV4(d, n).to(device)
+    rbl = Baseline(d, n).to(device)
+    train(rv4, xn, 150, n)
+
+    opt = torch.optim.Adam(rbl.parameters(), lr=0.01)
+    rbl.train()
+    for _ in range(150):
+        opt.zero_grad()
+        w, _ = rbl(xn)
+        w.sum().backward()
+        opt.step()
+
+    pct4, dev4, ent4 = dist_stats(rv4, xn, 100, n)
+
+    counts = torch.zeros(n, device=device)
+    rbl.eval()
+    with torch.no_grad():
+        for _ in range(100):
+            _, idx = rbl(xn)
+            top1   = idx[:, :, 0].flatten()
+            for i in range(n):
+                counts[i] += (top1 == i).sum()
+    pctb  = (counts / counts.sum()) * 100
+    devb  = torch.max(torch.abs(pctb - 100. / n)).item()
+    entb  = (-torch.sum((counts / counts.sum()) *
+              torch.log(counts / counts.sum() + 1e-9)) / math.log(n)).item()
+
+    print(f"\n  {'Model':<20} {'Sapma%':>8} {'Entropy':>8}")
+    print(f"  {'-'*40}")
+    print(f"  {'RouterV4':<20} {dev4:>8.2f} {ent4:>8.3f}  {'✅' if dev4 < 10 else '⚠️'}")
+    print(f"  {'Baseline':<20} {devb:>8.2f} {entb:>8.3f}")
+    print(f"\n  v4 Dağılımı:")
+    show_dist(pct4, n)
+    print(f"\n  Baseline Dağılımı:")
+    show_dist(pctb, n)
+
+def t2_scale():
+    hdr("TEST 2: Ölçeklenebilirlik (8 → 64 Expert)")
+    d, b, s = 256, 8, 32
+    print(f"\n  {'Experts':>8} {'Sapma%':>8} {'Entropy':>8} {'ms/fwd':>8} {'Durum':>6}")
+    print(f"  {'-'*44}")
+    for n in [8, 16, 32, 64]:
+        r  = RouterV4(d, n).to(device)
+        xn = F.layer_norm(torch.randn(b, s, d, device=device), (d,))
+        train(r, xn, 80, n)
+        t  = timed(lambda: r(xn, node=0), warmup=10, runs=100)
+        pct, dev, ent = dist_stats(r, xn, 100, n)
+        icon = "✅" if dev < 10 else ("⚠️" if dev < 20 else "❌")
+        print(f"  {n:>8} {dev:>8.2f} {ent:>8.3f} {t:>8.3f} {icon:>6}")
+        del r, xn
+        torch.cuda.empty_cache()
+
+def t3_stability():
+    hdr("TEST 3: Uzun Süre Stabilite (10.000 adım)")
+    d, n, b, s = 256, 8, 8, 32
+    r   = RouterV4(d, n).to(device)
+    opt = torch.optim.Adam(r.parameters(), lr=0.01)
+    xn  = F.layer_norm(torch.randn(b, s, d, device=device), (d,))
+    r.train()
+    print(f"\n  {'Adım':>8} {'Sapma%':>8} {'Entropy':>8} {'fat_max':>8} {'Durum':>6}")
+    print(f"  {'-'*44}")
+    devs = []
+    for step in range(10_000):
+        opt.zero_grad()
+        w, _ = r(xn, node=step % n)
+        w.sum().backward()
+        opt.step()
+        if (step + 1) % 1000 == 0:
+            pct, dev, ent = dist_stats(r, xn, 200, n)
+            fat = r.fat.max().item()
+            devs.append(dev)
+            icon = "✅" if dev < 5 else ("⚠️" if dev < 15 else "❌")
+            print(f"  {step+1:>8} {dev:>8.2f} {ent:>8.3f} {fat:>8.4f} {icon:>6}")
+            r.train()
+    avg   = sum(devs) / len(devs)
+    mx    = max(devs)
+    trend = "📉 İyileşiyor" if devs[-1] < devs[0] else "📈 Stabil"
+    print(f"\n  Ort: %{avg:.2f}  Maks: %{mx:.2f}  {trend}")
+    ok("Stabil!") if avg < 5 else warn(f"Sapma %{avg:.2f}")
+
+def t4_thermal():
+    hdr("TEST 4: Termal Yanıt (Simüle)")
+    d, n, b, s = 256, 8, 8, 32
+    r  = RouterV4(d, n).to(device)
+    xn = F.layer_norm(torch.randn(b, s, d, device=device), (d,))
+    train(r, xn, 150, n)
+
+    # Soguk: latency=0
+    cold = torch.zeros(n, device=device)
+    pct_c, dev_c, _ = dist_stats(r, xn, 100, n, lat=cold)
+
+    # Sicak: Expert 2 ve 3 asiri yuklu
+    hot = torch.zeros(n, device=device)
+    hot[2] = 5.0
+    hot[3] = 5.0
+    print("  🚨 Expert 2,3 → latency=5.0 (asiri yuklu)")
+    pct_h, dev_h, _ = dist_stats(r, xn, 100, n, lat=hot)
+
+    print(f"\n  Normal (sapma %{dev_c:.2f}):")
+    show_dist(pct_c, n)
+    print(f"\n  Yuklu (sapma %{dev_h:.2f}):")
+    show_dist(pct_h, n, hot=(2, 3))
+    for i in [2, 3]:
+        delta = pct_c[i].item() - pct_h[i].item()
+        print(f"  Expert {i}: %{pct_c[i]:.2f} → %{pct_h[i]:.2f}  (Δ={delta:+.2f})")
+
+    if pct_h[2].item() < 5 and pct_h[3].item() < 5:
+        ok("Yük yanıtı doğrulandı — router yüklü expertlerden kaçınıyor!")
+    else:
+        warn("Yanıt zayıf.")
+
+def t5_throughput():
+    hdr("TEST 5: Throughput — v2 vs v4 vs Baseline")
+    cfgs = [
+        (256,  8,  16, 64,  "Küçük    "),
+        (512,  8,  16, 128, "Orta     "),
+        (768,  8,  8,  128, "Büyük    "),
+        (512,  16, 8,  64,  "16-Expert"),
+        (512,  32, 8,  64,  "32-Expert"),
+        (512,  64, 4,  64,  "64-Expert"),
+    ]
+    print(f"\n  {'Konfig':<12} {'v2(ms)':>8} {'v4(ms)':>8} {'Base(ms)':>9}"
+          f" {'v2→v4':>7} {'v4/Base':>8}")
+    print(f"  {'-'*56}")
+    for d, n, b, s, label in cfgs:
+        v2  = RouterV2(d, n).to(device).eval()
+        v4  = RouterV4(d, n).to(device).eval()
+        bl  = Baseline(d, n).to(device).eval()
+        xn  = F.layer_norm(torch.randn(b, s, d, device=device), (d,))
+        lat = torch.zeros(n, device=device)
+
+        tv2 = timed(lambda: v2(xn, node=0, lat=lat))
+        tv4 = timed(lambda: v4(xn, node=0, lat=lat))
+        tbl = timed(lambda: bl(xn))
+
+        sp = tv2 / tv4
+        vb = tv4 / tbl
+        si = "🚀" if sp > 1.5 else ("✅" if sp > 1.1 else "➡️")
+        bi = "✅" if vb < 1.5 else ("⚠️" if vb < 3.0 else "❌")
+        print(f"  {label:<12} {tv2:>8.3f} {tv4:>8.3f} {tbl:>9.3f}"
+              f" {sp:>5.2f}x{si} {vb:>6.2f}x{bi}")
+        del v2, v4, bl, xn, lat
+        torch.cuda.empty_cache()
+
+    print(f"\n  v2→v4  : Hızlanma")
+    print(f"  v4/Base: Baseline'a oran (1.0=eşit, <2.0=kabul edilebilir)")
+
+def t6_dmodel():
+    hdr("TEST 6: d_model Ölçekleme (256 → 2048)")
+    n, b, s = 8, 4, 32
+    print(f"\n  {'d_model':>8} {'Sapma%':>8} {'Entropy':>8} {'VRAM(MB)':>10} {'Durum':>6}")
+    print(f"  {'-'*46}")
+    for d in [256, 512, 768, 1024, 2048]:
+        try:
+            torch.cuda.reset_peak_memory_stats()
+            r  = RouterV4(d, n).to(device)
+            xn = F.layer_norm(torch.randn(b, s, d, device=device), (d,))
+            train(r, xn, 80, n)
+            pct, dev, ent = dist_stats(r, xn, 60, n)
+            vram = torch.cuda.max_memory_allocated() / 1024**2
+            icon = "✅" if dev < 10 else ("⚠️" if dev < 20 else "❌")
+            print(f"  {d:>8} {dev:>8.2f} {ent:>8.3f} {vram:>10.1f} {icon:>6}")
+            del r, xn
+            torch.cuda.empty_cache()
+        except torch.cuda.OutOfMemoryError:
+            print(f"  {d:>8} {'OOM':>8} {'-':>8} {'-':>10} {'❌':>6}")
+            torch.cuda.empty_cache()
+
+def main():
+    print(f"\n{W}{'█'*60}")
+    print(f"  TUSofia-Rila v4 — T4 Benchmark")
+    print(f"  max_voltage=14.0  |  kappa=2.0")
+    print(f"{'█'*60}{X}")
+    print(f"  Cihaz: {device}")
+    if device.type == "cuda":
+        p = torch.cuda.get_device_properties(0)
+        print(f"  GPU  : {p.name}  |  VRAM: {p.total_memory/1024**3:.1f} GB")
+
+    for name, fn in [
+        ("Test 1 — Dağılım",     t1_distribution),
+        ("Test 2 — Ölçek",       t2_scale),
+        ("Test 3 — Stabilite",   t3_stability),
+        ("Test 4 — Yük Yanıtı",  t4_thermal),
+        ("Test 5 — Throughput",  t5_throughput),
+        ("Test 6 — d_model",     t6_dmodel),
+    ]:
+        try:
+            fn()
+        except Exception as e:
+            import traceback
+            fail(f"{name}: {e}")
+            traceback.print_exc()
+
+    hdr("ÖZET")
+    print("  Test 1 — Dağılım  : v4 vs Baseline kalite")
+    print("  Test 2 — Ölçek    : 8→64 expert")
+    print("  Test 3 — Stabilite: 10.000 adım")
+    print("  Test 4 — Yük Yanıtı: Aşırı yüklü expertlerden kaçınma")
+    print("  Test 5 — Throughput: v2 vs v4 vs Baseline ms")
+    print("  Test 6 — d_model  : 256→2048 VRAM")
+    ok("Tüm testler tamamlandı!")
+
+if __name__ == "__main__":
+    main()
