@@ -1,93 +1,212 @@
 # Physarum-3D Router 🦠🌌
 
-**Algorithm-Hardware Co-Design for Mixture-of-Experts (MoE)**
+**Bio-Inspired, Hardware-Aware Sparse MoE Routing Engine for LLMs**
 
+[![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC%20BY--NC--ND%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)
-[![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](http://creativecommons.org/licenses/by-nc-nd/4.0/)
 
-The **Physarum-3D Router** is a next-generation routing engine for Large Language Models (LLMs) utilizing Mixture-of-Experts (MoE) architectures. Unlike traditional routing mechanisms (e.g., standard Softmax/Top-K) that map tokens to experts strictly based on semantic logits, this router is **Hardware-Aware** and **Biologically Inspired**. 
+The **Physarum-3D Router** is a next-generation routing engine for Mixture-of-Experts (MoE) language models. Unlike standard routers (Softmax/Top-K with auxiliary loss), this router is **hardware-aware**, **biologically self-balancing**, and **patent-free**.
 
-By mapping GPU nodes to a 3D Euclidean space (Fibonacci Sphere) and utilizing the evolutionary foraging logic of the slime mold *Physarum polycephalum*, this engine optimizes for semantic accuracy, physical network latency, and datacenter thermals simultaneously.
-
-
+It uses algorithms inspired by the slime mold *Physarum polycephalum* combined with 3D Fibonacci Sphere topology mapping to optimize for semantic accuracy, network latency, GPU temperatures, and physical datacenter distances — simultaneously.
 
 ---
 
-## 🚀 Key Architectural Features
+## 🚀 Key Features
 
-* **Biological Memory (Self-Healing):** The router maintains a historical flow memory. It instinctively routes traffic away from overheated, congested, or dead GPUs (nodes), and gradually reintegrates them back into the network once they recover, achieving **Zero-Downtime**.
-* **3D Topology Mapping:** Virtualizes your Data Center compute nodes (e.g., 64 H100s) onto a 3D Fibonacci sphere. It computes the Euclidean distance between the active node and target experts to minimize cross-rack or cross-datacenter latency bottlenecks.
-* **Semantic-Physical Compartmentalization:** Naturally forces semantic opposites (e.g., Math vs. History tokens) to compute on physically distant hardware nodes, preventing network traffic collisions and allowing true specialized caching.
-* **Green AI & Energy Efficiency:** By penalizing distant physical routing, the system localizes data transfer. In our benchmarks, it reduced interconnect communication distance by **56.8%**, translating directly to massive energy savings ($E \propto d \times V$).
-* **Near-Zero Overhead:** The biological memory and distance calculations add only `~14ms` of computational overhead even when scaled to massive 1024-GPU clusters ($\mathcal{O}(1)$ time-to-recovery).
-
----
-
-## 📊 Academic Benchmark Highlights
-
-We stress-tested the Physarum-3D Router against standard Google/Meta MoE routers using simulated server congestion, heavy node overheating, and chaos engineering (hardware failures).
-
-| Metric | Classic Soft-MoE | Physarum-3D (Top-2) | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Physical Hop Distance** | `1.32 hops/token` | `0.60 hops/token` | **56.8% Energy Saved** 🔋 |
-| **Chaos Node Failure** | `177 Dropped Tokens` | `0 Dropped Tokens` | **Zero-Downtime** 🏆 |
-| **Time-to-Recovery** | `Panics / Fails` | `1 Step (Instant)` | **Self-Healing** 🧬 |
-| **Cold Start Latency** | `386.0 ms` | `135.4 ms` | **2.8x Faster** 🔥 |
-
-> *Simulations run on 32-Node 3D Spherical Network. Node failure test conducted with 15% random hardware death. Benchmark scripts are included for academic review.*
+| Feature | Description |
+|---------|-------------|
+| **Biological Memory (EMA)** | Remembers routing history via Exponential Moving Average. Auto-heals: routes away from overheated/dead GPUs, reintegrates them on recovery |
+| **3D Fibonacci Sphere** | Maps compute nodes onto a 3D sphere using golden-ratio spacing. Euclidean distance = cross-rack latency estimation |
+| **Cubic Congestion Escape** | `γ · M³` penalty creates sharp gradient cliffs — instantly evacuates overloaded experts |
+| **True Sparse MoE** | Hard Top-K (default: 2). Only selected experts execute. ~60% compute savings vs dense MoE |
+| **No Auxiliary Loss** | Expert balancing is intrinsic via biological memory — unlike Google Switch Transformer |
+| **Distance Matrix Caching** | Avoids redundant topology computation across forward passes |
+| **Alpha Warm-up Schedule** | Linear decay from pure semantic (α=1.0) → bio-evolved (α=0.05) for training stability |
+| **Distributed Sync** | `dist.all_reduce` synchronizes biological memory across GPUs in DDP/FSDP |
 
 ---
 
-## 🧠 How It Works (The Math)
+## 📊 Benchmark Results
 
-The core mechanism dynamically balances the "Semantic Pull" of the LLM with the "Physical Push" of the hardware state.
+### Physarum-3D vs Google Switch Transformer
 
-1.  **Raw Semantic Flow:** Traditional routers stop here.
-    $$Semantics = Dense(x)$$
-2.  **Hardware Topology Penalty:** Calculates the Euclidean distance from the source GPU to target GPUs on a virtual Fibonacci sphere, adding real-time sensor latency.
-    $$Penalty = (\beta_{dist} \cdot Distances) + (\beta_{lat} \cdot Latency_{sensors})$$
-3.  **Physarum Evolution:** Combines historical biological memory with current semantics, subtracting the hardware constraints to find the optimal reachable expert.
-    $$Flow_{evolved} = \alpha \cdot Semantics + (1-\alpha) \cdot Memory - Penalty$$
-4.  **Biological Update (Training):** The slime mold's memory shifts gradually toward successful, non-congested routes using an Exponential Moving Average (EMA).
+| Metric | Physarum-3D | Switch-T | Winner |
+|--------|:---:|:---:|:---:|
+| **Load Balancing (CV)** | Lower variance | Higher variance | **Physarum** |
+| **Auxiliary Loss Required** | ❌ None | ✅ Required | **Physarum** |
+| **Expert Death Prevention** | Intrinsic (cubic penalty) | Manual tuning | **Physarum** |
+| **Hardware Awareness** | 3D topology + live sensors | None | **Physarum** |
+| **Adversarial Resilience** | Strong | Weak | **Physarum** |
+| **Meltdown Recovery** | <5 steps | N/A | **Physarum** |
+| **Cold Start Latency** | ~135ms | ~386ms | **Physarum** |
+| **Energy Savings** | ~62.5% vs dense | N/A | **Physarum** |
+
+### Expert Load Distribution (50 batches, no auxiliary loss)
+
+```
+Expert 0:  13.9% ██████
+Expert 1:  19.6% █████████
+Expert 2:  16.9% ████████
+Expert 3:  17.4% ████████
+Expert 4:  17.8% ████████
+Expert 5:  14.5% ███████
+
+✅ Zero dead experts — balanced purely by biological memory!
+```
+
+*Benchmark scripts: `evaluate_3d_router_academic.py`, `benchmark_vs_switch.py`*
 
 ---
 
-## 🛠️ Usage Example
+## 🧠 How It Works
 
-The `Physarum3DRouter` is designed as a drop-in replacement for standard PyTorch MoE pipelines.
+```
+Token x ──→ Semantic Projection (Linear: d_model → num_experts)
+                    ↓
+          ┌─── Biological Evolution ───┐
+          │  F = α·Semantic + (1-α)·M  │  ← M = EMA biological memory
+          └────────────┬───────────────┘
+                       ↓
+          ┌─── Hardware Penalty ───────┐
+          │  P = β_d·Distance_3D       │  ← Fibonacci sphere Euclidean
+          │    + β_l·Latency_sensors   │  ← Real-time GPU heat
+          └────────────┬───────────────┘
+                       ↓
+          ┌─── Congestion Escape ──────┐
+          │  C = γ · M³                │  ← Cubic! Sharp evacuation
+          └────────────┬───────────────┘
+                       ↓
+             F_final = F - P - C
+                       ↓
+             Softmax → Top-K → Expert IDs + Weights
+```
+
+### Key Equations
+
+**Evolved Flow:**
+```
+F_evolved = α · F_semantic + (1 - α) · M_biological
+```
+
+**Hardware Penalty:**
+```
+P_hardware = β_dist · D_3D(source, target) + β_lat · L_dynamic
+```
+
+**Congestion Escape (cubic):**
+```
+P_congestion = γ · M³
+```
+> The cubic exponent creates an exponentially increasing penalty — much sharper than linear. When an expert exceeds ~60% load, the penalty overpowers raw logits and forces immediate traffic redistribution.
+
+**Biological Memory Update (training only):**
+```
+M_new = ema_decay · M_old + (1 - ema_decay) · avg_routing
+```
+
+---
+
+## ⚙️ Optimized Hyperparameters
+
+Found via 432-combination grid search across simulated datacenter conditions:
+
+| Parameter | Value | Role |
+|-----------|:-----:|------|
+| `alpha` | 0.05 | Bio memory weight (low = trust semantics more) |
+| `beta_dist` | 0.0 | 3D distance penalty (0 for single-GPU training) |
+| `beta_lat` | 0.5 | Latency/heat penalty multiplier |
+| `gamma` | 150.0 | Congestion penalty strength (3x default) |
+| `ema_decay` | 0.8 | Memory adaptation speed (0.8 = fast adaptation) |
+| `top_k` | 2 | Active experts per token |
+
+---
+
+## 🛠️ Usage
+
+### Standalone Router
 
 ```python
 import torch
 from physarum_3d_router import Physarum3DRouter
 
-# Initialize a 6-Expert System (Hidden Dim: 768)
+# Initialize: 6 experts, d_model=640, top-2 sparse routing
 router = Physarum3DRouter(
-    d_model=768, 
+    d_model=640, 
     num_experts=6, 
-    top_k=2,         # Number of experts to select
-    alpha=0.3,       # Biological memory coefficient
-    beta_dist=0.3,   # Physical distance penalty multiplier
-    beta_lat=0.7     # Thermal/Latency penalty multiplier
+    top_k=2,
+    alpha=0.05,       # Optimized bio memory coefficient
+    gamma=150.0,      # Optimized congestion penalty
+    ema_decay=0.8     # Fast memory adaptation
 )
 
-# Dummy Output (Batch 8, SeqLen 128, Dim 768)
-x = torch.randn(8, 128, 768)
+x = torch.randn(8, 128, 640)  # (batch, seq_len, d_model)
 
-# Connect to real-time datacenter/GPU thermal sensors (Simulated here)
-# e.g., Node 3 is running at 5x latency due to heat
-gpu_sensors = torch.ones(6) 
-gpu_sensors[3] = 5.0 
+# With GPU heat sensors (optional)
+latencies = torch.ones(6)
+latencies[3] = 5.0  # GPU 3 overheating
 
-# Route tokens! 
-route_weights, topk_indices = router(
-    x, 
-    current_node_idx=0, 
-    dynamic_latencies=gpu_sensors
-)
+weights, indices = router(x, current_node_idx=0, dynamic_latencies=latencies)
+# weights: (8, 128, 2) — importance scores
+# indices: (8, 128, 2) — selected expert IDs
+```
 
-print(f"Bypassed overheated Node 3 successfully!")
-print(f"Selected Experts: {topk_indices.shape}") # [8, 128, 2]
+### Alpha Warm-up (for training)
+
+```python
+router.set_warmup(warmup_steps=2000)  # α: 1.0 → 0.05 over 2000 steps
+
+for step in range(total_steps):
+    weights, indices = router(x)
+    # ... training logic ...
+    router.step_warmup()  # Advance α schedule
+```
+
+### Integrated in TUSofia-Rila V2 (True Sparse MoE)
+
+```python
+from tusofia_rila_v2 import TUSofiaRilaV2, CONFIG_V2
+
+model = TUSofiaRilaV2(CONFIG_V2).to("cuda")
+# Physarum-3D Router is integrated:
+#   - Only top-2 experts execute per token
+#   - Remaining 4 experts are SKIPPED (true sparse)
+#   - No auxiliary loss — bio memory handles balance
+```
+
+---
+
+## 📁 Files
+
+| File | Description |
+|------|-------------|
+| `physarum_3d_router.py` | Core router implementation (standalone, 204 lines) |
+| `tusofia_rila_v2.py` | Full model with sparse MoE integration |
+| `evaluate_3d_router_academic.py` | Academic test suite (9 tests) |
+| `benchmark_vs_switch.py` | Head-to-head vs Google Switch Transformer |
+| `generate_academic_figures.py` | Paper-quality figure generation |
+| `optimize_router_params.py` | 432-combination hyperparameter grid search |
+| `test_sparse_moe.py` | Sparse execution verification (6 tests) |
+
+---
+
+## 📝 Citation
+
+```bibtex
+@software{physarum3d_router_2025,
+  title={Physarum-3D Router: Bio-Inspired Hardware-Aware 
+         Sparse MoE Routing Without Auxiliary Loss},
+  author={TUSofia-Rila Team},
+  year={2025},
+  description={A routing algorithm for MoE LLMs inspired by 
+               Physarum polycephalum slime mold networks, 
+               with 3D Fibonacci sphere topology mapping 
+               and intrinsic expert load balancing.}
+}
+```
+
+---
+
 ⚖️ License & Commercial Use
 This project and its associated algorithms (including Physarum-3D Router, QuadLaser Positional Embedding, and AdaptVec) are strictly licensed under the Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License.
 
