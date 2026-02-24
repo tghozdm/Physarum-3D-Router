@@ -196,7 +196,7 @@ model = TUSofiaRilaV2(CONFIG_V2).to("cuda")
 @software{physarum3d_router_2025,
   title={Physarum-3D Router: Bio-Inspired Hardware-Aware 
          Sparse MoE Routing Without Auxiliary Loss},
-  author={TUSofia-Rila Team},
+  author={TUSofia-Rila  ,tghozdm },
   year={2025},
   description={A routing algorithm for MoE LLMs inspired by 
                Physarum polycephalum slime mold networks, 
