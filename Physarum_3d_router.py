@@ -1,4 +1,4 @@
-\"\"\"
+"""
 Physarum-3D Router for Mixture of Experts (MoE)
 ====================================================
 A bio-inspired, hardware-aware router for Large Language Models.
@@ -8,13 +8,14 @@ combined with 3D Fibonacci sphere topology to map experts to virtual
 Euclidean space. This enables the model to bypass overheated nodes,
 save energy, and map semantic distances to physical distances.
 
-Author: TUSofia-Rila Team
+Author: Tolgahan Özdemir github: tghozdm
 License: Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)
-\"\"\"
+"""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 import math
 
 class HardwareTopology3D(nn.Module):
@@ -30,6 +31,9 @@ class HardwareTopology3D(nn.Module):
         self.register_buffer('coordinates', coords)
 
     def _generate_fibonacci_sphere(self, samples, radius):
+        # Edge case: single expert needs no spatial distribution
+        if samples <= 1:
+            return torch.zeros(max(samples, 1), 3, dtype=torch.float32)
         coords = []
         phi = math.pi * (3. - math.sqrt(5.))  # Golden ratio
         for i in range(samples):
@@ -52,22 +56,35 @@ class Physarum3DRouter(nn.Module):
     Calculates optimum route based on mathematical logits (semantics),
     hardware temperature/latency, and physical distance.
     """
-    def __init__(self, d_model, num_experts, top_k=2, alpha=0.3, beta_dist=0.3, beta_lat=0.7):
+    def __init__(self, d_model, num_experts, top_k=2, alpha=0.05, beta_dist=0.0, beta_lat=0.5, gamma=150.0, ema_decay=0.8):
         """
         Args:
             d_model (int): Hidden dimension size (e.g. 768)
             num_experts (int): Total number of expert GPUs in the system
             top_k (int): Number of experts to route each token to
-            alpha (float): Biological memory/evolution coefficient (0.3 optimum)
+            alpha (float): Biological memory/evolution coefficient. Target value
+                after warm-up completes. Controls balance between raw semantic
+                logits and biological memory. Default: 0.3 (optimum)
             beta_dist (float): Physical distance penalty multiplier
             beta_lat (float): Network latency/heat penalty multiplier
+            gamma (float): Cubic congestion penalty coefficient. Controls how
+                aggressively the router penalizes overloaded experts. Default: 50.0
+            ema_decay (float): Exponential moving average decay rate for biological
+                memory updates. Higher = slower adaptation. Default: 0.9
         """
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
-        self.alpha = alpha
+        self.alpha_target = alpha  # Final alpha after warm-up
+        self.alpha = 1.0           # Start with pure semantic (warm-up begins at 1.0)
         self.beta_dist = beta_dist
         self.beta_lat = beta_lat
+        self.gamma = gamma
+        self.ema_decay = ema_decay
+        
+        # Warm-up state
+        self._warmup_steps = 0     # 0 = warm-up disabled until set
+        self._current_step = 0
         
         # Semantic mapping
         self.flow_proj = nn.Linear(d_model, num_experts)
@@ -77,6 +94,36 @@ class Physarum3DRouter(nn.Module):
         
         # 3D Space Manager
         self.topology = HardwareTopology3D(num_experts)
+        
+        # Distance Cache (avoids redundant topology computation)
+        self._cached_node_idx = -1
+        self._cached_distances = None
+
+    def set_warmup(self, warmup_steps):
+        """
+        Enable alpha warm-up schedule. During warm-up, alpha linearly decays
+        from 1.0 (pure semantic routing) to alpha_target (bio-evolved routing).
+        This stabilizes early training by letting the biological memory build
+        on a solid semantic foundation before influencing routing decisions.
+        
+        This is analogous to learning rate warm-up — a standard, patent-free
+        training stabilization technique.
+        
+        Args:
+            warmup_steps (int): Number of training steps for warm-up.
+                After this many steps, alpha reaches its target value.
+        """
+        self._warmup_steps = warmup_steps
+        self._current_step = 0
+        self.alpha = 1.0  # Reset to pure semantic
+    
+    def step_warmup(self):
+        """Call once per training step to advance the alpha warm-up schedule."""
+        if self._warmup_steps > 0 and self._current_step < self._warmup_steps:
+            self._current_step += 1
+            progress = self._current_step / self._warmup_steps
+            # Linear interpolation: 1.0 → alpha_target
+            self.alpha = 1.0 - (1.0 - self.alpha_target) * progress
 
     def forward(self, x, current_node_idx=0, dynamic_latencies=None):
         """
@@ -93,8 +140,11 @@ class Physarum3DRouter(nn.Module):
         # 1. Calculate Semantic Flow
         raw_flow = self.flow_proj(x)
         
-        # 2. Fetch Hardware Topology State
-        distances = self.topology.get_distance_matrix(current_node_idx).to(x.device)
+        # 2. Fetch Hardware Topology State (with distance caching)
+        if self._cached_node_idx != current_node_idx or self._cached_distances is None:
+            self._cached_distances = self.topology.get_distance_matrix(current_node_idx)
+            self._cached_node_idx = current_node_idx
+        distances = self._cached_distances.to(x.device)
         
         if dynamic_latencies is None:
             dynamic_latencies = torch.ones(self.num_experts, device=x.device)
@@ -104,17 +154,31 @@ class Physarum3DRouter(nn.Module):
         hardware_penalty = hardware_penalty.view(1, 1, self.num_experts) 
         
         # 4. Biological Evolution & Congestion Escape
+        # Prevent Routing Collapse: if flow_memory is huge, that expert is overcrowded (congestion)
+        # We cubic exponentiate and scale aggressively to overpower raw logits (+40) if an expert hits >80% capacity
+        congestion_penalty = torch.pow(self.flow_memory, 3) * self.gamma
+        
         evolved_flow = self.alpha * raw_flow + (1 - self.alpha) * self.flow_memory.view(1, 1, self.num_experts)
-        evolved_flow = evolved_flow - hardware_penalty
+        evolved_flow = evolved_flow - hardware_penalty - congestion_penalty.view(1, 1, self.num_experts)
         
         # 5. Route Selection
         route_probs = F.softmax(evolved_flow, dim=-1)
         route_weights, topk_indices = torch.topk(route_probs, k=self.top_k, dim=-1)
         
-        # 6. Update Biological Memory (Training Only)
+        # 6. Normalize Top-K Weights (sum to 1.0 per token)
+        # Without this, selected expert outputs would be under-weighted
+        route_weights = route_weights / (route_weights.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        # 7. Update Biological Memory (Training Only)
         if self.training:
             avg_routing = route_probs.mean(dim=[0, 1]).detach()
-            new_memory = 0.9 * self.flow_memory + 0.1 * avg_routing
+            new_memory = self.ema_decay * self.flow_memory + (1 - self.ema_decay) * avg_routing
+            
+            # 8. Distributed Sync: synchronize biological memory across all GPUs
+            # Without this, each GPU would develop divergent routing memories in DDP/FSDP
+            if dist.is_initialized():
+                dist.all_reduce(new_memory, op=dist.ReduceOp.AVG)
+            
             self.flow_memory.copy_(new_memory)
             
         return route_weights, topk_indices
